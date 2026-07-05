@@ -71,12 +71,20 @@ class TaskConstructor:
     def _construct_churn_task(self, task: ChurnTasks) -> TaskSettings:
         target_calculator = ChurnTargetCalculator()
         metric_calculator = ChurnMetricCalculator()
+    
+        pos_weight = torch.tensor([6010.0 / 161.0])  # anpassen falls sich Zahlen nochmal ändern
+    
+        def weighted_bce(pred, target):
+            return F.binary_cross_entropy_with_logits(
+                pred, target, pos_weight=pos_weight.to(pred.device)
+            )
+    
         return TaskSettings(
             target_calculator=target_calculator,
             metric_calculator=metric_calculator,
-            loss_fn=F.binary_cross_entropy_with_logits,
+            loss_fn=weighted_bce,
         )
-
+    
     def _construct_propensity_task(self, task: PropensityTasks) -> TaskSettings:
         propensity_targets, popularity_data = self._load_propensity_targets(task)
 
