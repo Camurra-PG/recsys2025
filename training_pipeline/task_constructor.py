@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
+import pandas as pd
 
 from typing import Callable, List, Tuple
 from dataclasses import dataclass, field
@@ -71,13 +72,13 @@ class TaskConstructor:
     def _construct_churn_task(self, task: ChurnTasks) -> TaskSettings:
         target_calculator = ChurnTargetCalculator()
         metric_calculator = ChurnMetricCalculator()
-    
+
         n_pos = 6010.0   # target == 1 (Mehrheit: kein Re-Kauf)
         n_neg = 161.0    # target == 0 (Minderheit: Re-Kauf)
         total = n_pos + n_neg
         w1 = total / (2.0 * n_pos)   # ≈ 0.513
         w0 = total / (2.0 * n_neg)   # ≈ 19.16
-    
+
         def weighted_bce(pred, target):
             weight = torch.where(
                 target == 1,
@@ -85,21 +86,58 @@ class TaskConstructor:
                 torch.full_like(target, w0),
             )
             return F.binary_cross_entropy_with_logits(pred, target, weight=weight)
-    
+
         return TaskSettings(
             target_calculator=target_calculator,
             metric_calculator=metric_calculator,
             loss_fn=weighted_bce,
         )
     
+    def _compute_propensity_pos_weight(
+        self, task: PropensityTasks, propensity_targets: np.ndarray
+    ) -> torch.Tensor:
+        """
+        Ein pos_weight PRO Klasse (nicht ein einzelner Skalar wie bei Churn),
+        weil jede der 20 Kategorien/SKUs unterschiedlich oft positiv ist.
+        """
+        from training_pipeline.target_data import TargetData
+
+        target_data = TargetData.read_from_dir(target_dir=self.data_dir.target_dir)
+        all_targets = pd.concat([target_data.train_df, target_data.validation_df])
+
+        column = task.value  # z.B. "propensity_category"
+        n_total = len(all_targets)
+
+        exploded = (
+            all_targets[["client_id", column]]
+            .explode(column)
+            .dropna(subset=[column])
+        )
+        counts_series = exploded[column].value_counts()
+
+        counts = np.array(
+            [counts_series.get(cls_id, 0) for cls_id in propensity_targets],
+            dtype=np.float64,
+        )
+        counts = np.clip(counts, 1, None)  # Division durch 0 verhindern
+
+        weights = (n_total - counts) / counts
+        weights = np.clip(weights, 1.0, 200.0)  # Obergrenze gegen Instabilität
+
+        return torch.tensor(weights, dtype=torch.float32)
     def _construct_propensity_task(self, task: PropensityTasks) -> TaskSettings:
         propensity_targets, popularity_data = self._load_propensity_targets(task)
 
-        # PropensityTargetCalculator now takes the task itself, not a split column name
         target_calculator = PropensityTargetCalculator(
             task=task, propensity_targets=propensity_targets
         )
-    
+
+        pos_weight = self._compute_propensity_pos_weight(task, propensity_targets)
+
+        def weighted_bce(pred, target):
+            return F.binary_cross_entropy_with_logits(
+                pred, target, pos_weight=pos_weight.to(pred.device)
+            )
 
         metric_calculator = PropensityMetricCalculator(
             output_dim=target_calculator.target_dim,
@@ -109,7 +147,7 @@ class TaskConstructor:
         return TaskSettings(
             target_calculator=target_calculator,
             metric_calculator=metric_calculator,
-            loss_fn=F.binary_cross_entropy_with_logits,
+            loss_fn=weighted_bce,
         )
 
     def _load_propensity_targets(
