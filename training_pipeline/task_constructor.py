@@ -80,9 +80,11 @@ class TaskConstructor:
     def _construct_propensity_task(self, task: PropensityTasks) -> TaskSettings:
         propensity_targets, popularity_data = self._load_propensity_targets(task)
 
+        # PropensityTargetCalculator now takes the task itself, not a split column name
         target_calculator = PropensityTargetCalculator(
             task=task, propensity_targets=propensity_targets
         )
+    
 
         metric_calculator = PropensityMetricCalculator(
             output_dim=target_calculator.target_dim,
@@ -117,11 +119,16 @@ def transform_client_ids_and_embeddings(
     embeddings: np.ndarray,
     data_dir: DataDir,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Restrict client_ids to active clients for churn task.
-    """
     if task == ChurnTasks.CHURN:
-        active_clients = np.load(data_dir.target_dir / "active_clients.npy")
-        mask = np.isin(client_ids, active_clients)
+        from training_pipeline.target_data import TargetData
+        import pandas as pd
+
+        target_data = TargetData.read_from_dir(target_dir=data_dir.target_dir)
+        all_targets = pd.concat([target_data.train_df, target_data.validation_df])
+        churn_defined_ids = all_targets.loc[
+            all_targets["churn"].notna(), "client_id"
+        ].to_numpy()
+
+        mask = np.isin(client_ids, churn_defined_ids)
         return client_ids[mask], embeddings[mask]
     return client_ids, embeddings
