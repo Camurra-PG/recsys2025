@@ -122,7 +122,7 @@ class TaskConstructor:
         counts = np.clip(counts, 1, None)  # Division durch 0 verhindern
 
         weights = (n_total - counts) / counts
-        weights = np.clip(weights, 1.0, 200.0)  # Obergrenze gegen Instabilität
+        weights = np.clip(weights, 1.0, 20.0)  # Obergrenze gegen Instabilität
 
         return torch.tensor(weights, dtype=torch.float32)
     def _construct_propensity_task(self, task: PropensityTasks) -> TaskSettings:
