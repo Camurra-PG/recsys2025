@@ -72,12 +72,19 @@ class TaskConstructor:
         target_calculator = ChurnTargetCalculator()
         metric_calculator = ChurnMetricCalculator()
     
-        pos_weight = torch.tensor([161.0 / 6010.0])  # anpassen falls sich Zahlen nochmal ändern
+        n_pos = 6010.0   # target == 1 (Mehrheit: kein Re-Kauf)
+        n_neg = 161.0    # target == 0 (Minderheit: Re-Kauf)
+        total = n_pos + n_neg
+        w1 = total / (2.0 * n_pos)   # ≈ 0.513
+        w0 = total / (2.0 * n_neg)   # ≈ 19.16
     
         def weighted_bce(pred, target):
-            return F.binary_cross_entropy_with_logits(
-                pred, target, pos_weight=pos_weight.to(pred.device)
+            weight = torch.where(
+                target == 1,
+                torch.full_like(target, w1),
+                torch.full_like(target, w0),
             )
+            return F.binary_cross_entropy_with_logits(pred, target, weight=weight)
     
         return TaskSettings(
             target_calculator=target_calculator,
