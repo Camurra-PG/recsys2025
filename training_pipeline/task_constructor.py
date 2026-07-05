@@ -1,7 +1,7 @@
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
-import pandas as pd
 
 from typing import Callable, List, Tuple
 from dataclasses import dataclass, field
@@ -22,19 +22,14 @@ from training_pipeline.target_calculators import (
     ChurnTargetCalculator,
     PropensityTargetCalculator,
 )
+from training_pipeline.target_data import TargetData
 
 from data_utils.data_dir import DataDir
-from training_pipeline.metrics_containers import (
-    MetricContainer,
-)
+from training_pipeline.metrics_containers import MetricContainer
 
 
 @dataclass(frozen=True)
 class TaskSettings:
-    """
-    Container class which stores all task specific data structures.
-    """
-
     target_calculator: TargetCalculator
     metric_calculator: MetricCalculator
     loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
@@ -42,26 +37,10 @@ class TaskSettings:
 
 
 class TaskConstructor:
-    """
-    Class for constructing all task specific data structures.
-    """
-
     def __init__(self, data_dir: DataDir):
-        """
-        Args:
-            data_dir (DataDir): container for simplified access to subdirectories of data_dir.
-        """
         self.data_dir = data_dir
 
     def construct_task(self, task: ValidTasks) -> TaskSettings:
-        """
-        Method for constructing task specific data structures.
-
-        Args:
-            task (ValidTasks): task for which data structures are constructed.
-        Returns:
-            TaskSettings: container with data structures for given task
-        """
         if isinstance(task, ChurnTasks):
             return self._construct_churn_task(task=task)
         elif isinstance(task, PropensityTasks):
@@ -69,15 +48,27 @@ class TaskConstructor:
         else:
             raise TaskNotSupportedError("An unsupported task was provided.")
 
+    def _load_all_targets(self) -> pd.DataFrame:
+        target_data = TargetData.read_from_dir(target_dir=self.data_dir.target_dir)
+        return pd.concat(
+            [target_data.train_df, target_data.validation_df], ignore_index=True
+        )
+
     def _construct_churn_task(self, task: ChurnTasks) -> TaskSettings:
-        target_calculator = ChurnTargetCalculator()
+        all_targets = self._load_all_targets()
+
+        target_calculator = ChurnTargetCalculator(target_df=all_targets)
         metric_calculator = ChurnMetricCalculator()
 
-        n_pos = 6010.0   # target == 1 (Mehrheit: kein Re-Kauf)
-        n_neg = 161.0    # target == 0 (Minderheit: Re-Kauf)
+        churn_defined = all_targets["churn"].dropna()
+        n_pos = float((churn_defined == 1).sum())  # Mehrheit: kein Re-Kauf
+        n_neg = float((churn_defined == 0).sum())  # Minderheit: Re-Kauf
         total = n_pos + n_neg
-        w1 = total / (2.0 * n_pos)   # ≈ 0.513
-        w0 = total / (2.0 * n_neg)   # ≈ 19.16
+
+        # Symmetrische Klassen-Gewichtung (NICHT pos_weight, das nur target==1
+        # skaliert -- waere hier falsch, weil Label 1 bei Churn die MEHRHEIT ist).
+        w1 = total / (2.0 * max(n_pos, 1.0))
+        w0 = total / (2.0 * max(n_neg, 1.0))
 
         def weighted_bce(pred, target):
             weight = torch.where(
@@ -92,47 +83,16 @@ class TaskConstructor:
             metric_calculator=metric_calculator,
             loss_fn=weighted_bce,
         )
-    
-    def _compute_propensity_pos_weight(
-        self, task: PropensityTasks, propensity_targets: np.ndarray
-    ) -> torch.Tensor:
-        """
-        Ein pos_weight PRO Klasse (nicht ein einzelner Skalar wie bei Churn),
-        weil jede der 20 Kategorien/SKUs unterschiedlich oft positiv ist.
-        """
-        from training_pipeline.target_data import TargetData
 
-        target_data = TargetData.read_from_dir(target_dir=self.data_dir.target_dir)
-        all_targets = pd.concat([target_data.train_df, target_data.validation_df])
-
-        column = task.value  # z.B. "propensity_category"
-        n_total = len(all_targets)
-
-        exploded = (
-            all_targets[["client_id", column]]
-            .explode(column)
-            .dropna(subset=[column])
-        )
-        counts_series = exploded[column].value_counts()
-
-        counts = np.array(
-            [counts_series.get(cls_id, 0) for cls_id in propensity_targets],
-            dtype=np.float64,
-        )
-        counts = np.clip(counts, 1, None)  # Division durch 0 verhindern
-
-        weights = (n_total - counts) / counts
-        weights = np.clip(weights, 1.0, 20.0)  # Obergrenze gegen Instabilität
-
-        return torch.tensor(weights, dtype=torch.float32)
     def _construct_propensity_task(self, task: PropensityTasks) -> TaskSettings:
         propensity_targets, popularity_data = self._load_propensity_targets(task)
+        all_targets = self._load_all_targets()
 
         target_calculator = PropensityTargetCalculator(
-            task=task, propensity_targets=propensity_targets
+            task=task, propensity_targets=propensity_targets, target_df=all_targets
         )
 
-        pos_weight = self._compute_propensity_pos_weight(task, propensity_targets)
+        pos_weight = self._compute_propensity_pos_weight(task, propensity_targets, all_targets)
 
         def weighted_bce(pred, target):
             return F.binary_cross_entropy_with_logits(
@@ -150,19 +110,34 @@ class TaskConstructor:
             loss_fn=weighted_bce,
         )
 
-    def _load_propensity_targets(
+    def _compute_propensity_pos_weight(
         self,
         task: PropensityTasks,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+        propensity_targets: np.ndarray,
+        all_targets: pd.DataFrame,
+    ) -> torch.Tensor:
+        column = task.value
+        n_total = len(all_targets)
 
+        exploded = all_targets[["client_id", column]].explode(column).dropna(subset=[column])
+        counts_series = exploded[column].value_counts()
+
+        counts = np.array(
+            [counts_series.get(cls_id, 0) for cls_id in propensity_targets],
+            dtype=np.float64,
+        )
+        counts = np.clip(counts, 1, None)
+
+        weights = (n_total - counts) / counts
+        weights = np.clip(weights, 1.0, 20.0)  # Cap gegen Instabilitaet
+
+        return torch.tensor(weights, dtype=torch.float32)
+
+    def _load_propensity_targets(self, task: PropensityTasks) -> Tuple[np.ndarray, np.ndarray]:
         propensity_targets = np.load(
-            self.data_dir.target_dir / f"{task.value}.npy",
-            allow_pickle=True,
+            self.data_dir.target_dir / f"{task.value}.npy", allow_pickle=True
         )
-        popularity_data = np.load(
-            self.data_dir.target_dir / f"popularity_{task.value}.npy"
-        )
-
+        popularity_data = np.load(self.data_dir.target_dir / f"popularity_{task.value}.npy")
         return propensity_targets, popularity_data
 
 
@@ -173,15 +148,11 @@ def transform_client_ids_and_embeddings(
     data_dir: DataDir,
 ) -> Tuple[np.ndarray, np.ndarray]:
     if task == ChurnTasks.CHURN:
-        from training_pipeline.target_data import TargetData
-        import pandas as pd
-
         target_data = TargetData.read_from_dir(target_dir=data_dir.target_dir)
         all_targets = pd.concat([target_data.train_df, target_data.validation_df])
         churn_defined_ids = all_targets.loc[
             all_targets["churn"].notna(), "client_id"
         ].to_numpy()
-
         mask = np.isin(client_ids, churn_defined_ids)
         return client_ids[mask], embeddings[mask]
     return client_ids, embeddings
