@@ -72,7 +72,7 @@ class TaskConstructor:
         target_calculator = ChurnTargetCalculator()
         metric_calculator = ChurnMetricCalculator()
     
-        pos_weight = torch.tensor([6010.0 / 161.0])  # anpassen falls sich Zahlen nochmal ändern
+        pos_weight = torch.tensor([161.0 / 6010.0])  # anpassen falls sich Zahlen nochmal ändern
     
         def weighted_bce(pred, target):
             return F.binary_cross_entropy_with_logits(
