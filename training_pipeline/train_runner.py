@@ -101,6 +101,7 @@ def run_training(
         accelerator=accelerator,
         devices=devices,
         max_epochs=MAX_EPOCH,
+        enable_checkpointing=False,
         enable_progress_bar=train_logging_config.logging_enabled,
         enable_model_summary=train_logging_config.logging_enabled,
         logger=train_logger,
