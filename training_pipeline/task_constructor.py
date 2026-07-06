@@ -19,6 +19,7 @@ from training_pipeline.tasks import (
 )
 from training_pipeline.target_calculators import (
     TargetCalculator,
+    ActiveTargetCalculator,
     ChurnTargetCalculator,
     PropensityTargetCalculator,
 )
@@ -56,6 +57,17 @@ class TaskConstructor:
 
     def _construct_churn_task(self, task: ChurnTasks) -> TaskSettings:
         all_targets = self._load_all_targets()
+
+        if task == ChurnTasks.ACTIVE:
+            # Active ist deutlich ausgeglichener (~14% positiv vs. <1% bei
+            # Kauf-basierten Tasks) - keine spezielle Klassengewichtung noetig.
+            target_calculator = ActiveTargetCalculator(target_df=all_targets)
+            metric_calculator = ChurnMetricCalculator()
+            return TaskSettings(
+                target_calculator=target_calculator,
+                metric_calculator=metric_calculator,
+                loss_fn=F.binary_cross_entropy_with_logits,
+            )
 
         target_calculator = ChurnTargetCalculator(target_df=all_targets)
         metric_calculator = ChurnMetricCalculator()

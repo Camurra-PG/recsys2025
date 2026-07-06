@@ -65,3 +65,27 @@ class PropensityTargetCalculator(TargetCalculator):
             positive_ids = np.asarray(positive_ids)
             target[np.isin(self._propensity_targets, positive_ids, assume_unique=True)] = 1.0
         return target
+
+
+class ActiveTargetCalculator(TargetCalculator):
+    """
+    Reads the explicit `active` column produced by
+    build_retailrocket_eval_dataset.py: whether the client had ANY event
+    (not just a purchase) in the target window. This is a much denser
+    signal than churn/propensity, since ~14% of relevant clients are
+    active vs. <1% who purchase.
+    """
+
+    def __init__(self, target_df: pd.DataFrame):
+        self._active_by_client = dict(zip(target_df["client_id"], target_df["active"]))
+
+    @property
+    def target_dim(self) -> int:
+        return 1
+
+    def compute_target(self, client_id: int, target_df: pd.DataFrame) -> np.ndarray:
+        target = np.zeros(self.target_dim, dtype=np.float32)
+        value = self._active_by_client.get(client_id)
+        if value is not None and not pd.isna(value):
+            target[0] = float(value)
+        return target

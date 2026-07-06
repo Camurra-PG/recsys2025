@@ -12,6 +12,7 @@ class ValidTasks(Enum):
 class ChurnTasks(ValidTasks):
     CHURN = "churn"
     CONVERSION = "conversion"
+    ACTIVE = "active"
 
 
 class PropensityTasks(ValidTasks):
