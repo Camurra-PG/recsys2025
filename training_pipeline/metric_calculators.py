@@ -1,11 +1,9 @@
 import torch
 import numpy as np
-
 from torchmetrics import (
     AUROC,
 )
 from abc import ABC, abstractmethod
-
 from training_pipeline.metrics_containers import (
     MetricContainer,
     ChurnMetricContainer,
@@ -32,7 +30,6 @@ class MetricCalculator(ABC):
     ):
         """
         Method for updating metrics managed by the metric tracker.
-
         Args:
             self
             predictions (torch.Tensor): predictions of the model
@@ -46,10 +43,8 @@ class MetricCalculator(ABC):
     ) -> MetricContainer:
         """
         Method for computing metrics managed by the metric tracker.
-
         Args:
             self
-
         Returns:
             MetricContainer : dataclass storing metrics.
         """
@@ -62,7 +57,6 @@ class MetricCalculator(ABC):
     ):
         """
         Move evaluation objects to the same device as computation.
-
         Args:
             self
             device (torch.device): Device which to move the evaluation objects.
@@ -85,7 +79,6 @@ class ChurnMetricCalculator(MetricCalculator):
     def compute(self) -> ChurnMetricContainer:
         auroc = self.val_auroc.compute()
         self.val_auroc.reset()
-
         return ChurnMetricContainer(val_auroc=auroc.item())
 
     def to(self, device: torch.device):
@@ -96,36 +89,82 @@ class PropensityMetricCalculator(MetricCalculator):
     """
     Instance of the abstract `MetricCalculator` class for computing metrics for
     propensity type tasks.
+
+    In addition to the original macro-averaged AUROC, this calculator also
+    tracks:
+      - a micro-averaged AUROC (pools all classes into one binary problem,
+        more robust when some classes have very few positive validation
+        examples), and
+      - Hit-Rate@K (fraction of clients with a true positive label whose
+        label appears in the model's top-K predictions).
+    Both are reported alongside the original metrics, never replacing them.
     """
 
-    def __init__(self, output_dim: int, popularity_data: np.ndarray):
+    def __init__(self, output_dim: int, popularity_data: np.ndarray, hit_rate_k: int = 3):
         self.val_auroc = AUROC(
             task="multilabel",
             num_labels=output_dim,
         )
+        self.val_micro_auroc = AUROC(
+            task="multilabel",
+            num_labels=output_dim,
+            average="micro",
+        )
         self.val_novelty = Novelty(popularity_data=popularity_data)
         self.val_diversity = Diversity(output_dim=output_dim)
 
+        self.hit_rate_k = min(hit_rate_k, output_dim)
+        self._hit_rate_hits = 0
+        self._hit_rate_total = 0
+
     def update(self, predictions: torch.Tensor, targets: torch.Tensor):
         self.val_auroc.update(predictions, targets)
+        self.val_micro_auroc.update(predictions, targets)
         self.val_diversity.update(predictions=predictions)
         self.val_novelty.update(predictions=predictions)
+
+        # Hit-Rate@K nur ueber Clients mit mindestens einem echten Positiv-Label,
+        # damit die Metrik nicht durch Clients ohne jedes Label verwaessert wird.
+        has_positive = targets.sum(dim=1) > 0
+        if has_positive.any():
+            preds_pos = predictions[has_positive]
+            targets_pos = targets[has_positive]
+            topk_idx = preds_pos.topk(self.hit_rate_k, dim=1).indices
+            hits = torch.gather(targets_pos, 1, topk_idx).sum(dim=1) > 0
+            self._hit_rate_hits += int(hits.sum().item())
+            self._hit_rate_total += int(has_positive.sum().item())
 
     def compute(self) -> PropensityMetricContainer:
         auroc = self.val_auroc.compute()
         self.val_auroc.reset()
+
+        micro_auroc = self.val_micro_auroc.compute()
+        self.val_micro_auroc.reset()
+
         diversity = self.val_diversity.compute()
         self.val_diversity.reset()
+
         novelty = self.val_novelty.compute()
         self.val_novelty.reset()
+
+        hit_rate = (
+            self._hit_rate_hits / self._hit_rate_total
+            if self._hit_rate_total > 0
+            else float("nan")
+        )
+        self._hit_rate_hits = 0
+        self._hit_rate_total = 0
 
         return PropensityMetricContainer(
             val_auroc=auroc.item(),
             val_diversity=diversity.item(),
             val_novelty=novelty.item(),
+            val_micro_auroc=micro_auroc.item(),
+            val_hit_rate_at_k=hit_rate,
         )
 
     def to(self, device: torch.device):
-        self.auroc = self.val_auroc.to(device)
+        self.val_auroc = self.val_auroc.to(device)
+        self.val_micro_auroc = self.val_micro_auroc.to(device)
         self.val_diversity = self.val_diversity.to(device=device)
         self.val_novelty = self.val_novelty.to(device=device)
